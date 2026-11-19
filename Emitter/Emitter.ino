@@ -13,6 +13,12 @@ uint8_t ble_connection_state = false;
 
 #define PIPE_UART_OVER_BTLE_UART_TX_TX 0
 
+// Functions defined in UART.ino
+int BLEsetup();
+void aci_loop();
+uint8_t lib_aci_send_data(uint8_t ignore, uint8_t *sendBuffer,
+                          uint8_t sendLength);
+
 unsigned long lastUpdate = 0;
 const unsigned long interval = 33; // Read sensor every 500 ms
 
@@ -22,6 +28,26 @@ int lastX = 0, lastY = 0;
 bool haveLast = false;     // False until first reading
 bool wasConnected = false; // Connection state in last loop
 bool sendPending = false;  // True if a send must be done or retried
+
+// Start/stop button
+#define TOGGLE_BUTTON TSButtonLowerRight
+bool running = true;  // True = reading and sending
+bool lastBtn = false; // Button state in last loop
+unsigned long lastBtnChange = 0;
+const unsigned long debounceMs = 50;
+
+void showStatus() {
+  NVIC_DisableIRQ(EIC_IRQn);
+  display.setCursor(0, 44);
+  if (running) {
+    display.fontColor(TS_8b_Green, TS_8b_Black);
+    display.print("RUNNING   ");
+  } else {
+    display.fontColor(TS_8b_Red, TS_8b_Black);
+    display.print("PAUSED    ");
+  }
+  NVIC_EnableIRQ(EIC_IRQn);
+}
 
 void setup() {
   delay(500);
@@ -38,6 +64,7 @@ void setup() {
 
   accel.begin(BMA250_range_2g, BMA250_update_time_64ms);
   BLEsetup();
+  showStatus();
 }
 
 void loop() {
@@ -48,6 +75,32 @@ void loop() {
     sendPending = true;
   }
   wasConnected = ble_connection_state;
+
+  // Button check runs every loop so it feels instant
+  bool btn = display.getButtons(TOGGLE_BUTTON);
+  if (btn != lastBtn && millis() - lastBtnChange > debounceMs) {
+    lastBtnChange = millis();
+    lastBtn = btn;
+
+    if (btn) { // Only act on press, not release
+      running = !running;
+
+      if (running) {
+        haveLast = false; // Force a fresh read and send on resume
+      } else {
+        sendPending = false; // Drop anything waiting
+        if (ble_connection_state) {
+          const char msg[] = "PAUSED\n";
+          lib_aci_send_data(PIPE_UART_OVER_BTLE_UART_TX_TX, (uint8_t *)msg,
+                            sizeof(msg) - 1);
+        }
+      }
+      showStatus();
+    }
+  }
+
+  if (!running)
+    return; // Paused: skip sensor and BLE send
 
   if (millis() - lastUpdate < interval)
     return;
