@@ -23,6 +23,7 @@ uint32_t stateSince = 0;
 uint16_t connection = 0, serviceStart = 0, serviceEnd = 0;
 uint16_t notifyHandle = 0, descriptorEnd = 0, cccdHandle = 0;
 uint8_t peerAddress[6], peerAddressType;
+bool havePeer = false;
 bool haveSample = false, screenDirty = true;
 int remoteX = 0, remoteY = 0;
 char lineBuffer[64];
@@ -64,6 +65,14 @@ bool selectionPending = false;
 void recordDevice(uint8_t type, const uint8_t *address, uint8_t eventType,
                   const uint8_t *data, uint8_t length, int8_t rssi) {
   if (state != SCANNING) return;
+  bool connectable = eventType == ADV_IND || eventType == ADV_DIRECT_IND;
+  if (havePeer) {
+    if (connectable && type == peerAddressType && memcmp(peerAddress, address, 6) == 0) {
+      selectionPending = true;
+      changeState(STOP_SCAN);
+    }
+    return;
+  }
   uint8_t index = 0;
   while (index < deviceCount && (devices[index].addressType != type ||
          memcmp(devices[index].address, address, 6))) ++index;
@@ -76,7 +85,7 @@ void recordDevice(uint8_t type, const uint8_t *address, uint8_t eventType,
   }
   Device &device = devices[index];
   device.rssi = rssi;
-  if (eventType == ADV_IND || eventType == ADV_DIRECT_IND) device.connectable = true;
+  if (connectable) device.connectable = true;
   for (unsigned offset = 0; offset < length;) {
     uint8_t size = data[offset];
     if (!size || offset + size + 1 > length) break;
@@ -105,6 +114,7 @@ void pollButtons() {
   stable = raw;
   if (pressed & TSButtonLowerRight) {
     // Resetting the radio also safely cancels scanning or a connection.
+    havePeer = false;
     changeState(RESTART);
     return;
   }
@@ -115,6 +125,7 @@ void pollButtons() {
   if ((pressed & TSButtonUpperRight) && devices[selectedDevice].connectable) {
     memcpy(peerAddress, devices[selectedDevice].address, 6);
     peerAddressType = devices[selectedDevice].addressType;
+    havePeer = true;
     selectionPending = true;
     changeState(state == SCANNING ? STOP_SCAN : CONNECT);
   }
@@ -164,7 +175,7 @@ uint8_t initializeRadio() {
   i2cErr = 99;
   lineLength = 0;
   droppingLine = false;
-  serviceStart = serviceEnd = notifyHandle = descriptorEnd = cccdHandle = 0;
+  connection = serviceStart = serviceEnd = notifyHandle = descriptorEnd = cccdHandle = 0;
   HCI_Init();
   BNRG_SPI_Init();
   BlueNRG_RST();
@@ -184,7 +195,7 @@ void drawScreen() {
   display.clearScreen();
   display.setCursor(0, 0);
   display.fontColor(TS_8b_Green, TS_8b_Black);
-  if (state == SCANNING || state == PICK_DEVICE || state == START_SCAN) {
+  if (!havePeer && (state == SCANNING || state == PICK_DEVICE || state == START_SCAN)) {
     display.print(state == PICK_DEVICE ? "Devices " : "Scanning ");
     display.print(deviceCount);
     display.fontColor(TS_8b_White, TS_8b_Black);
@@ -225,10 +236,13 @@ void drawScreen() {
     display.setCursor(0, 38); display.print("Y: "); display.print(remoteY);
     display.setCursor(0, 50); display.print("TX: "); display.print(i2cErr);
     
-  } else if (state == SCANNING || state == START_SCAN) display.print("Searching...");
+  } else if (state == SCANNING || state == START_SCAN || state == STOP_SCAN || state == WAIT_SCAN_STOP) display.print("Finding emitter");
   else if (state == CONNECTING || state == CONNECT) display.print("Connecting...");
   else if (state == RESTART) display.print("Retrying...");
   else display.print("Subscribing...");
+  if (state != RECEIVING && havePeer) {
+    display.setCursor(0, 54); display.print("LR choose device");
+  }
 }
 
 void setup() {
@@ -351,7 +365,7 @@ void HCI_Event_CB(void *packet) {
       evt_gap_procedure_complete *done = (evt_gap_procedure_complete *)blue->data;
       if (done->procedure_code == GAP_GENERAL_DISCOVERY_PROC) {
         if (state == WAIT_SCAN_STOP || state == STOP_SCAN || state == SCANNING)
-          changeState(selectionPending ? CONNECT : PICK_DEVICE);
+          changeState(selectionPending ? CONNECT : (havePeer ? START_SCAN : PICK_DEVICE));
       } else if (state == CONNECTING && done->status) changeState(RESTART);
       break;
     }
